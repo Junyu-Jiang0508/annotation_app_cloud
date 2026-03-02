@@ -158,12 +158,17 @@ def save_poem_perspective(annotator_id: str, poem_id: str, data: dict):
         raise RuntimeError(f"Failed to save poem perspective: {e}")
 
 
+def _reviewed_key(poem_id, sentence_id) -> tuple:
+    """Normalize key for reviewed set (handles float sentence_id from CSV)."""
+    return (str(poem_id), int(sentence_id) if pd.notna(sentence_id) else 0)
+
+
 def is_poem_fully_annotated(poem_id: str, display_df: pd.DataFrame, reviewed: set) -> bool:
-    poem_sents = display_df[display_df["ID"] == poem_id]
+    poem_sents = display_df[display_df["ID"].astype(str) == str(poem_id)]
     if poem_sents.empty:
         return False
     for _, r in poem_sents.iterrows():
-        key = (str(r["ID"]), int(r["sentence_id"]) if pd.notna(r["sentence_id"]) else 0)
+        key = _reviewed_key(r["ID"], r["sentence_id"])
         if key not in reviewed:
             return False
     return True
@@ -277,8 +282,20 @@ def main():
         if poem_id_filter != "All":
             display_df = display_df[display_df["ID"] == poem_id_filter]
 
+        # Direct jump by poem ID (search)
+        jump_id = st.text_input("Jump to poem by ID", placeholder="e.g. UP324", key="jump_poem_id")
+        if jump_id and jump_id.strip():
+            match_idx = display_df[display_df["ID"].astype(str) == str(jump_id.strip())].index
+            if len(match_idx) > 0:
+                first_idx = min(max(0, display_df.index.get_loc(match_idx[0])), len(display_df) - 1)
+                if st.button("Go to poem", key="jump_poem_btn"):
+                    st.session_state.force_nav_idx = first_idx
+                    st.rerun()
+            else:
+                st.caption("Poem ID not found in current filter.")
+
         total = len(display_df)
-        done = sum(1 for _, r in display_df.iterrows() if (r["ID"], r["sentence_id"]) in reviewed)
+        done = sum(1 for _, r in display_df.iterrows() if _reviewed_key(r["ID"], r["sentence_id"]) in reviewed)
         st.metric("Sentences", total, f"Annotated {done}")
         pronoun_count = sum(1 for a in st.session_state.annotations if not a.get("no_pronoun"))
         st.metric("Pronouns annotated", pronoun_count, "")
@@ -290,7 +307,10 @@ def main():
         st.divider()
         if "nav_idx" not in st.session_state:
             st.session_state.nav_idx = 0
-        idx = st.number_input("Go to sentence", min_value=0, max_value=max(0, total - 1), value=st.session_state.nav_idx, step=1, key="nav_idx_input")
+        max_idx = max(0, total - 1)
+        # Clamp nav_idx to valid range (prevents StreamlitValueAboveMaxError when filters change)
+        safe_value = min(max(0, st.session_state.nav_idx), max_idx)
+        idx = st.number_input("Go to sentence", min_value=0, max_value=max_idx, value=safe_value, step=1, key="nav_idx_input")
         st.session_state.nav_idx = int(idx)
         if st.button("Next →"):
             next_idx = min(int(idx) + 1, total - 1)
@@ -422,35 +442,38 @@ def main():
 
     poem_id = str(row["ID"])
     poem_fully_done = is_poem_fully_annotated(poem_id, display_df, reviewed)
+
+    st.divider()
+    st.subheader("Poem Perspective")
     if poem_fully_done:
-        st.divider()
-        st.subheader("Poem Perspective")
         st.caption("Poem fully annotated. Judge the overall perspective. Primary required; secondary optional.")
-        st.markdown("**Full poem**")
-        st.text_area("full_poem", value=row["context"], height=200, disabled=True, key=f"full_poem_{poem_id}", label_visibility="collapsed")
-        current = st.session_state.poem_perspectives.get(poem_id, {})
-        primary = current.get("perspective_primary", current.get("perspective", ""))
-        secondary = current.get("perspective_secondary", "")
-        legacy_map = {"第一人称": "1st person", "第二人称": "2nd person", "第三人称": "3rd person", "混合": "Mixed", "其他": "Other", "无": "None"}
-        primary = legacy_map.get(primary, primary)
-        secondary = legacy_map.get(secondary, secondary) if secondary else "None"
-        idx_primary = PERSPECTIVE_OPTIONS.index(primary) if primary in PERSPECTIVE_OPTIONS else 0
-        idx_secondary = PERSPECTIVE_SECONDARY_OPTIONS.index(secondary) if secondary in PERSPECTIVE_SECONDARY_OPTIONS else 0
-        new_primary = st.selectbox("Primary perspective", PERSPECTIVE_OPTIONS, index=idx_primary, key=f"perspective_primary_{poem_id}")
-        new_secondary = st.selectbox("Secondary perspective (optional)", PERSPECTIVE_SECONDARY_OPTIONS, index=idx_secondary, key=f"perspective_secondary_{poem_id}")
-        if st.button("Save poem perspective", key=f"save_perspective_{poem_id}"):
-            try:
-                data = {
-                    "perspective_primary": new_primary,
-                    "perspective_secondary": new_secondary if new_secondary != "None" else "",
-                    "author": row.get("author", ""),
-                    "date": row.get("date", ""),
-                }
-                save_poem_perspective(annotator_id, poem_id, data)
-                st.session_state.poem_perspectives[poem_id] = data
-                st.success("Saved")
-            except Exception as e:
-                st.error(f"Save failed: {e}")
+    else:
+        st.caption("You can add perspective now. (Recommended: complete all sentence annotations first.)")
+    st.markdown("**Full poem**")
+    st.text_area("full_poem", value=row["context"], height=200, disabled=True, key=f"full_poem_{poem_id}", label_visibility="collapsed")
+    current = st.session_state.poem_perspectives.get(poem_id, {})
+    primary = current.get("perspective_primary", current.get("perspective", ""))
+    secondary = current.get("perspective_secondary", "")
+    legacy_map = {"第一人称": "1st person", "第二人称": "2nd person", "第三人称": "3rd person", "混合": "Mixed", "其他": "Other", "无": "None"}
+    primary = legacy_map.get(primary, primary)
+    secondary = legacy_map.get(secondary, secondary) if secondary else "None"
+    idx_primary = PERSPECTIVE_OPTIONS.index(primary) if primary in PERSPECTIVE_OPTIONS else 0
+    idx_secondary = PERSPECTIVE_SECONDARY_OPTIONS.index(secondary) if secondary in PERSPECTIVE_SECONDARY_OPTIONS else 0
+    new_primary = st.selectbox("Primary perspective", PERSPECTIVE_OPTIONS, index=idx_primary, key=f"perspective_primary_{poem_id}")
+    new_secondary = st.selectbox("Secondary perspective (optional)", PERSPECTIVE_SECONDARY_OPTIONS, index=idx_secondary, key=f"perspective_secondary_{poem_id}")
+    if st.button("Save poem perspective", key=f"save_perspective_{poem_id}"):
+        try:
+            data = {
+                "perspective_primary": new_primary,
+                "perspective_secondary": new_secondary if new_secondary != "None" else "",
+                "author": row.get("author", ""),
+                "date": row.get("date", ""),
+            }
+            save_poem_perspective(annotator_id, poem_id, data)
+            st.session_state.poem_perspectives[poem_id] = data
+            st.success("Saved")
+        except Exception as e:
+            st.error(f"Save failed: {e}")
 
     st.divider()
     pronoun_annots = [a for a in st.session_state.annotations if not a.get("no_pronoun")]
